@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Schema smoke test
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/src"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/src/tl_layer"
+          export PYTHONPATH="$RUNNER_TEMP/src"
+          python -m tl_layer stats
+          python -m tl_layer lookup help.getConfig

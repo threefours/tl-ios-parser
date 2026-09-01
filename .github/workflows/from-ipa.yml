@@ -1,0 +1,62 @@
+name: Extract IPA layer
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: HTTPS URL of a decrypted Telegram .ipa (leave empty to use the IPA_URL secret)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: from-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  from-ipa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download IPA and extract layer
+        env:
+          INPUT_URL: ${{ inputs.ipa_url }}
+          SECRET_URL: ${{ secrets.IPA_URL }}
+        run: |
+          set -euo pipefail
+          URL="${INPUT_URL:-}"
+          if [ -z "$URL" ]; then
+            URL="${SECRET_URL:-}"
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::Pass ipa_url when running the workflow, or add a repo secret named IPA_URL."
+            exit 1
+          fi
+
+          IPA="$RUNNER_TEMP/app.ipa"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$IPA" "$URL"
+          ls -lh "$IPA"
+
+          mkdir -p "$RUNNER_TEMP/src"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/src/tl_layer"
+          export PYTHONPATH="$RUNNER_TEMP/src"
+
+          mkdir -p out
+          python -m tl_layer from-ipa "$IPA" -o out/ipa_layer.json
+
+      - name: Upload JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-layer
+          path: out/ipa_layer.json
+          if-no-files-found: error
