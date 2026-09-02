@@ -99,33 +99,35 @@ Payload/              unpacked IPA (not required if you pass a .ipa)
 
 ## GitHub Actions
 
-Do **not** commit the IPA (size + Telegram binary). CI downloads it at run time.
+Put a decrypted `.ipa` in `ipa/` and push. The **Extract IPA layer** workflow runs on that push (and from **Actions → Run workflow**). Download the `ipa-layer` artifact when it finishes.
 
-The GitHub repo root *is* this package. Run it as `tl_layer` by putting the clone on `PYTHONPATH` under that name (the workflow does this with a symlink).
+GitHub blocks files over **100MB** unless they are in Git LFS:
 
-### One-off extract
+```text
+git lfs install
+git add .gitattributes
+git add ipa/your.ipa
+git commit -m "Add Telegram IPA"
+git push
+```
 
-1. Push these workflows (`.github/workflows/`).
-2. Add a repository secret **or** pass a URL when you run the workflow:
-   - **Secret (better):** repo **Settings → Secrets and variables → Actions → New repository secret**, name `IPA_URL`, value a direct HTTPS link to a **decrypted** `.ipa`.
-   - **Manual URL:** Actions → **Extract IPA layer** → **Run workflow** → paste `ipa_url`.
-3. Open **Actions → Extract IPA layer → Run workflow**.
-4. When it finishes, download the `ipa-layer` artifact (`ipa_layer.json`).
+The web **Upload files** button also rejects >100MB — use the CLI + LFS for a full IPA.
+
+The GitHub repo root *is* this package. The workflow symlinks the checkout as `tl_layer` so `python -m tl_layer` works.
 
 `CI` runs on push/PR and only executes `stats` / `lookup` (no IPA).
 
 ### Local equivalent of the Action
 
 ```text
-curl -L -o app.ipa "https://example.com/telegram.ipa"
 mkdir -p /tmp/src && ln -s "$(pwd)" /tmp/src/tl_layer
-PYTHONPATH=/tmp/src python -m tl_layer from-ipa app.ipa -o out/ipa_layer.json
+PYTHONPATH=/tmp/src python -m tl_layer from-ipa ipa/your.ipa -o out/ipa_layer.json
 ```
 
 On Windows (from the parent of this folder, if the folder is named `tl_layer`):
 
 ```text
-python -m tl_layer from-ipa app.ipa -o tl_layer\out\ipa_layer.json
+python -m tl_layer from-ipa tl_layer\ipa\your.ipa -o tl_layer\out\ipa_layer.json
 ```
 
 ## Library

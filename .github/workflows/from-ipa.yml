@@ -2,11 +2,11 @@ name: Extract IPA layer
 
 on:
   workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: HTTPS URL of a decrypted Telegram .ipa (leave empty to use the IPA_URL secret)
-        required: false
-        type: string
+  push:
+    paths:
+      - "ipa/**"
+      - "*.ipa"
+      - ".github/workflows/from-ipa.yml"
 
 permissions:
   contents: read
@@ -22,29 +22,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download IPA and extract layer
-        env:
-          INPUT_URL: ${{ inputs.ipa_url }}
-          SECRET_URL: ${{ secrets.IPA_URL }}
+      - name: Find IPA in the repo and extract layer
         run: |
           set -euo pipefail
-          URL="${INPUT_URL:-}"
-          if [ -z "$URL" ]; then
-            URL="${SECRET_URL:-}"
+          shopt -s nullglob
+
+          IPA=""
+          candidates=(ipa/*.ipa *.ipa)
+          if [ ${#candidates[@]} -gt 0 ]; then
+            IPA="${candidates[0]}"
           fi
-          if [ -z "$URL" ]; then
-            echo "::error::Pass ipa_url when running the workflow, or add a repo secret named IPA_URL."
+
+          if [ -z "$IPA" ]; then
+            echo "::error::Put a decrypted .ipa in the ipa/ folder (or repo root) and push. GitHub rejects files over 100MB unless you use Git LFS (see README)."
             exit 1
           fi
 
-          IPA="$RUNNER_TEMP/app.ipa"
-          curl -fsSL --retry 3 --retry-delay 2 -o "$IPA" "$URL"
+          echo "Using $IPA"
           ls -lh "$IPA"
 
           mkdir -p "$RUNNER_TEMP/src"
