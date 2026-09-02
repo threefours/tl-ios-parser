@@ -99,19 +99,23 @@ Payload/              unpacked IPA (not required if you pass a .ipa)
 
 ## GitHub Actions
 
-Put a decrypted `.ipa` in `ipa/` and push. The **Extract IPA layer** workflow runs on that push (and from **Actions → Run workflow**). Download the `ipa-layer` artifact when it finishes.
+Do **not** commit the IPA into git. The website caps uploads to the repo at **25MB**; `git push` caps a blob at **100MB**. A Telegram IPA is larger than both.
 
-GitHub blocks files over **100MB** unless they are in Git LFS:
+Put the file on a **GitHub Release** instead (assets up to **2GB**):
+
+1. Repo → **Releases → Draft a new release**
+2. Tag e.g. `ipa` (reuse the same tag next time, or make `ipa-12.9.3`)
+3. Attach the decrypted `.ipa` under **Attach binaries**
+4. Publish. The **Extract IPA layer** workflow starts automatically.
+5. Download the `ipa-layer` artifact (`ipa_layer.json`).
+
+To run again without a new release: **Actions → Extract IPA layer → Run workflow** (empty tag = latest release, or type the tag name).
+
+From the CLI:
 
 ```text
-git lfs install
-git add .gitattributes
-git add ipa/your.ipa
-git commit -m "Add Telegram IPA"
-git push
+gh release create ipa path\to\app.ipa --title "IPA" --notes ""
 ```
-
-The web **Upload files** button also rejects >100MB — use the CLI + LFS for a full IPA.
 
 The GitHub repo root *is* this package. The workflow symlinks the checkout as `tl_layer` so `python -m tl_layer` works.
 
@@ -121,13 +125,13 @@ The GitHub repo root *is* this package. The workflow symlinks the checkout as `t
 
 ```text
 mkdir -p /tmp/src && ln -s "$(pwd)" /tmp/src/tl_layer
-PYTHONPATH=/tmp/src python -m tl_layer from-ipa ipa/your.ipa -o out/ipa_layer.json
+PYTHONPATH=/tmp/src python -m tl_layer from-ipa app.ipa -o out/ipa_layer.json
 ```
 
 On Windows (from the parent of this folder, if the folder is named `tl_layer`):
 
 ```text
-python -m tl_layer from-ipa tl_layer\ipa\your.ipa -o tl_layer\out\ipa_layer.json
+python -m tl_layer from-ipa app.ipa -o tl_layer\out\ipa_layer.json
 ```
 
 ## Library

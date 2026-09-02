@@ -2,11 +2,13 @@ name: Extract IPA layer
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "ipa/**"
-      - "*.ipa"
-      - ".github/workflows/from-ipa.yml"
+    inputs:
+      release_tag:
+        description: Release tag that has the .ipa attached (leave empty for the latest release)
+        required: false
+        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -22,39 +24,44 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Find IPA in the repo and extract layer
+      - name: Download IPA from GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          mkdir -p "$RUNNER_TEMP/ipa"
+          cd "$RUNNER_TEMP/ipa"
 
-          IPA=""
-          candidates=(ipa/*.ipa *.ipa)
-          if [ ${#candidates[@]} -gt 0 ]; then
-            IPA="${candidates[0]}"
+          if [ -n "${TAG:-}" ]; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "*.ipa"
+          else
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern "*.ipa"
           fi
 
-          if [ -z "$IPA" ]; then
-            echo "::error::Put a decrypted .ipa in the ipa/ folder (or repo root) and push. GitHub rejects files over 100MB unless you use Git LFS (see README)."
+          shopt -s nullglob
+          files=(*.ipa)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No .ipa on this release. Open Releases, create a release, attach the decrypted IPA (up to 2GB), then re-run."
             exit 1
           fi
+          echo "IPA=${files[0]}" >> "$GITHUB_ENV"
+          ls -lh "${files[0]}"
 
-          echo "Using $IPA"
-          ls -lh "$IPA"
-
+      - name: Extract layer
+        run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/src"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/src/tl_layer"
           export PYTHONPATH="$RUNNER_TEMP/src"
-
           mkdir -p out
-          python -m tl_layer from-ipa "$IPA" -o out/ipa_layer.json
+          python -m tl_layer from-ipa "$RUNNER_TEMP/ipa/$IPA" -o out/ipa_layer.json
 
       - name: Upload JSON
         uses: actions/upload-artifact@v4
