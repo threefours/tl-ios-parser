@@ -70,6 +70,21 @@ Names follow Swift (`botId`, `replyMarkup`), not TL snake_case (`bot_id`).
 
 Optional fields from `T?` become `optional: true`. Flag **bit numbers** (`flags.0?`) are not in the mangled name, so they are omitted. Constructor ids (`#4ea9b3bf`) are ARM immediates in the function body and are not filled in.
 
+If a Swift type substitution cannot be resolved from this mangled string, the type is left as `subst_N`. Argument types are never guessed from parameter names.
+
+## Diff two layers
+
+Pass two `ipa_layer.json` dumps, or two IPAs / `Payload` trees / binaries:
+
+```text
+python -m tl_layer diff old.json new.json
+python -m tl_layer diff old.ipa new.ipa
+python -m tl_layer diff old.json new.json --brief
+python -m tl_layer diff old.json new.json -o diff.json
+```
+
+Prints added / removed / changed methods (arguments, result type, constructor id when present), grouped by namespace. Does **not** load `api.tl`. Exit code is `1` if anything differs, `0` if the APIs match.
+
 ## Optional schema tools
 
 `tl_layer/schema/api.tl` and `mtproto.tl` are a checked-in official TL snapshot. They are used only by these commands:
@@ -90,10 +105,12 @@ python -m tl_layer index
 tl_layer/
   from_ipa.py         IPA unpack, layer thunk, Core framework
   swift_mangling.py   FunctionDescription demangle (labels + types)
+  diff_layer.py       Readable diff of two layer dumps
   parser.py           TL language parser (optional schema commands)
   models.py           Combinator / Parameter / TypeExpr
   schema/             api.tl, mtproto.tl (optional)
   out/ipa_layer.json  last from-ipa dump
+  out/ipa_layer.txt   readable listing (same as the GitHub Action report)
 Payload/              unpacked IPA (not required if you pass a .ipa)
 ```
 
@@ -107,7 +124,9 @@ Put the file on a **GitHub Release** instead (assets up to **2GB**):
 2. Tag e.g. `ipa` (reuse the same tag next time, or make `ipa-12.9.3`)
 3. Attach the decrypted `.ipa` under **Attach binaries**
 4. Publish. The **Extract IPA layer** workflow starts automatically.
-5. Download the `ipa-layer` artifact (`ipa_layer.json`).
+5. Download the `ipa-layer` artifact (`ipa_layer.json` + readable `ipa_layer.txt`).
+
+The Action log prints the same text report (every method as a TL-like line). `subst_N` is an unresolved Swift back-reference, not a guessed type.
 
 To run again without a new release: **Actions → Extract IPA layer → Run workflow** (empty tag = latest release, or type the tag name).
 
@@ -138,8 +157,10 @@ python -m tl_layer from-ipa app.ipa -o tl_layer\out\ipa_layer.json
 
 ```python
 from pathlib import Path
-from tl_layer import extract_from_path
+from tl_layer import diff_paths, extract_from_path
 
 info = extract_from_path(Path("Payload"))
 print(info["layer"], info["methods_with_params"])
+
+diff = diff_paths(Path("old.json"), Path("new.json"))
 ```

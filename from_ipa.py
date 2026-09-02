@@ -8,16 +8,10 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .swift_mangling import attach_binary_methods
+from .swift_mangling import attach_binary_methods, extract_method_cstrings
 
 MANGLED_FN = re.compile(
     rb"TelegramApi0B0O9functionsO((?:\d+[A-Za-z][A-Za-z0-9]*O)*\d+[A-Za-z][A-Za-z0-9]*)"
-)
-METHOD_STRING = re.compile(
-    rb"(?:account|auth|bots|channels|chatlists|communities|contacts|ephemeral|"
-    rb"folders|fragment|help|langpack|messages|payments|phone|photos|premium|"
-    rb"smsjobs|stats|stickers|stories|updates|upload|users|aicompose)"
-    rb"\.[a-zA-Z][a-zA-Z0-9]*"
 )
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -162,9 +156,7 @@ def find_layer_number(data: bytes) -> LayerHit:
 
 
 def extract_method_names(data: bytes) -> list[str]:
-    names: set[str] = set()
-    for match in METHOD_STRING.finditer(data):
-        names.add(match.group().decode("ascii"))
+    names: set[str] = set(extract_method_cstrings(data))
     for match in MANGLED_FN.finditer(data):
         parts = _parse_len_idents(match.group(1).decode("ascii", "ignore"))
         if len(parts) >= 2:
@@ -215,3 +207,42 @@ def extract_from_path(path: Path) -> dict:
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def format_layer_report(info: dict) -> str:
+    """Human-readable listing of the IPA extract (same data as ipa_layer.json)."""
+    methods = info.get("methods") or []
+    subst = 0
+    unknown = 0
+    missing = 0
+    for method in methods:
+        if method.get("missing_signature"):
+            missing += 1
+        if method.get("result_type") == "Unknown":
+            unknown += 1
+        for param in method.get("params") or []:
+            name = (param.get("type") or {}).get("name") or ""
+            if str(name).startswith("subst"):
+                subst += 1
+    lines = [
+        f"layer {info.get('layer')}",
+        f"methods {info.get('methods_in_ipa_count', len(methods))}",
+        f"with Swift signature {info.get('methods_with_signature', 0)}",
+        f"with arguments {info.get('methods_with_params', 0)}",
+        f"no signature {missing}",
+        f"unresolved subst_N {subst}",
+        f"Unknown result {unknown}",
+        "",
+        "Types come from the IPA mangled names only. subst_N means the Swift",
+        "back-reference had no identifier in this fragment (not a guessed type).",
+        "",
+    ]
+    current_ns = None
+    for method in methods:
+        name = method.get("name") or ""
+        ns = name.split(".", 1)[0] if "." in name else "(root)"
+        if ns != current_ns:
+            current_ns = ns
+            lines.append(f"[{ns}]")
+        lines.append(f"  {method.get('tl') or name}")
+    return "\n".join(lines) + "\n"

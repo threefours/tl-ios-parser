@@ -4,9 +4,10 @@ The compiled Swift methods live in LINKEDIT as mangled fragments:
 
     [optional truncated name][labels]AA19FunctionDescriptionC_[types]tFZ
 
-Word substitutions (`0I6Markup` → `replyMarkup`) are resolved by replaying
-the identifier words from `TelegramApi` / `Api` / `functions` / namespace /
-method name, matching Swift's 26-word table.
+Type names are taken only when the identifier is present in that fragment
+(`9InputPeerO` → InputPeer). A back-reference with no identifier (`AQ`, `AT`)
+stays `subst_N`. Nothing is filled in from api.tl, argument-name tables, or a
+hardcoded Swift module tree — those would invent types on the next layer.
 """
 
 from __future__ import annotations
@@ -46,11 +47,8 @@ SWIFT_PRIMITIVE = {
     "Double": "double",
 }
 
-METHOD_STRING = re.compile(
-    r"(?:account|auth|bots|channels|chatlists|communities|contacts|ephemeral|"
-    r"folders|fragment|help|langpack|messages|payments|phone|photos|premium|"
-    r"smsjobs|stats|stickers|stories|updates|upload|users|aicompose)"
-    r"\.[a-zA-Z][a-zA-Z0-9]*"
+_CSTRING_METHOD = re.compile(
+    rb"\x00([a-z]{2,32}\.[a-z][a-zA-Z0-9]{2,80})\x00"
 )
 
 
@@ -346,32 +344,34 @@ def parse_head(text: str, words: WordTable, *, expect_method: str | None = None)
 
 
 def _parse_subst_indices(text: str, i: int) -> tuple[list[int] | None, int]:
-    """Parse `A…` substitution. Returns substitution indices."""
+    """Parse `A…` type substitution. `A2X` is subst 23 twice; `AT` is subst 19."""
     if i >= len(text) or text[i] != "A":
         return None, i
     i += 1
     if i >= len(text):
         return None, i
-    if is_digit(text[i]):
+    lead_repeat = 1
+    if is_digit(text[i]) and text[i] != "0":
         n, j = _natural(text, i)
         if n is None:
             return None, i
         if j < len(text) and text[j] == "_":
-            return [n], j + 1
-        if j < len(text) and is_letter(text[j]):
-            i = j
-        else:
-            return [n + 26], j
-    if text[i] == "_":
-        return [0], i + 1
+            return [26 + n], j + 1
+        lead_repeat = n
+        i = j
+    if i < len(text) and text[i] == "_":
+        return [0] * lead_repeat, i + 1
     indices: list[int] = []
+    first = True
     while i < len(text):
-        repeat = 1
+        repeat = lead_repeat if first else 1
+        first = False
         if is_digit(text[i]) and text[i] != "0":
-            n, i = _natural(text, i)
+            n, i2 = _natural(text, i)
             if n is None:
                 break
             repeat = n
+            i = i2
         if i >= len(text) or not is_letter(text[i]):
             break
         ch = text[i]
@@ -386,15 +386,36 @@ def _parse_subst_indices(text: str, i: int) -> tuple[list[int] | None, int]:
     return (indices if indices else None), i
 
 
+def _tl_leaf(name: str) -> str:
+    if name.startswith("subst_"):
+        return name
+    short = name.rsplit(".", 1)[-1]
+    if short and short[0].isupper() and not short.startswith("subst"):
+        return short
+    if name.startswith("TelegramApi.Api."):
+        return name[len("TelegramApi.Api.") :]
+    if name.startswith("TelegramApi."):
+        return name[len("TelegramApi.") :]
+    return name
+
+
+def _expr(name: str, *, args: list[TypeExpr] | None = None) -> TypeExpr:
+    leaf = _tl_leaf(name)
+    if args:
+        return TypeExpr(name=leaf, args=args)
+    return TypeExpr(name=leaf)
+
+
 class TypeParser:
+    """Demangle FunctionDescription type payloads.
+
+    Bare Swift substitutions (`AQ`) are not looked up in a guessed prefix table:
+    the fragment is truncated, so those indices would silently map to the wrong
+    type on a newer layer. Only identifiers that appear in the bytes are used.
+    """
+
     def __init__(self, words: WordTable) -> None:
         self.words = words
-        self.substs: list[str] = []
-
-    def remember(self, name: str) -> str:
-        if name and name not in ("Vector", "Optional"):
-            self.substs.append(name)
-        return name
 
     def parse_type(self, text: str, i: int) -> tuple[TypeExpr | None, int]:
         if i >= len(text):
@@ -423,74 +444,122 @@ class TypeParser:
                     repeat = n
                     j = j2
             if j < len(text) and text[j] in KNOWN_S:
-                name = KNOWN_S[text[j]]
+                raw = KNOWN_S[text[j]]
                 j += 1
-                mapped = SWIFT_PRIMITIVE.get(name, name)
+                mapped = SWIFT_PRIMITIVE.get(raw, raw)
                 if repeat == 1:
                     return TypeExpr(name=mapped), j
                 return TypeExpr(name="Repeat", args=[TypeExpr(name=mapped)], multiplicity=repeat), j
 
-        if text.startswith("s", i) and i + 1 < len(text) and is_digit(text[i + 1]):
+        if text.startswith("s", i) and i + 1 < len(text) and (
+            is_digit(text[i + 1]) or text[i + 1] == "0"
+        ):
             ident, j = parse_identifier(text, i + 1, self.words)
             if ident is None:
                 return None, i
             if j < len(text) and text[j] in "COV":
                 j += 1
             mapped = SWIFT_PRIMITIVE.get(ident, ident)
-            self.remember(mapped)
-            return TypeExpr(name=mapped), j
+            t = TypeExpr(name=mapped)
+            t, j = self._generics(text, j, t)
+            return t, j
 
         if i < len(text) and text[i] == "A":
             idxs, j = _parse_subst_indices(text, i)
             if idxs is None:
                 return None, i
-            base = None
-            if len(idxs) == 1 and idxs[0] < len(self.substs):
-                base = self.substs[idxs[0]]
+            if j < len(text) and text[j] in "COV" and j + 1 < len(text) and (
+                is_digit(text[j + 1]) or text[j + 1] == "0"
+            ):
+                j += 1
             if j < len(text) and (is_digit(text[j]) or text[j] == "0"):
                 ident, k = parse_identifier(text, j, self.words)
-                if ident is None:
-                    if base:
-                        return TypeExpr(name=base), j
-                    return TypeExpr(name=f"subst_{idxs[0]}" if idxs else "subst"), j
-                j = k
-                if j < len(text) and text[j] in "COV":
-                    j += 1
-                self.remember(ident)
-                return TypeExpr(name=ident), j
-            if base:
-                return TypeExpr(name=base), j
-            return TypeExpr(name=f"subst_{idxs[0]}" if idxs else "subst"), j
+                if ident is not None:
+                    j = k
+                    if j < len(text) and text[j] in "COV":
+                        j += 1
+                    t = _expr(ident)
+                    t, j = self._generics(text, j, t)
+                    return t, j
+            tag = f"subst_{idxs[0]}" if idxs else "subst"
+            inner = _expr(tag)
+            if idxs and len(idxs) > 1 and all(x == idxs[0] for x in idxs):
+                t = TypeExpr(name="Repeat", args=[inner], multiplicity=len(idxs))
+            else:
+                t = inner
+            t, j = self._generics(text, j, t)
+            return t, j
 
-        if i < len(text) and is_digit(text[i]):
+        if i < len(text) and (is_digit(text[i]) or text[i] == "0"):
             ident, j = parse_identifier(text, i, self.words)
             if ident is None:
                 return None, i
             if j < len(text) and text[j] in "COV":
                 j += 1
-            self.remember(ident)
-            return TypeExpr(name=ident), j
+            t = _expr(ident)
+            t, j = self._generics(text, j, t)
+            return t, j
 
         return None, i
+
+    def _generics(self, text: str, i: int, base: TypeExpr) -> tuple[TypeExpr, int]:
+        if i >= len(text) or text[i] != "y":
+            return base, i
+        args: list[TypeExpr] = []
+        j = i + 1
+        while j < len(text) and text[j] != "G":
+            if text[j] == "_":
+                j += 1
+                continue
+            arg, j2 = self.parse_type(text, j)
+            if arg is None:
+                break
+            args.extend(self._flatten(arg))
+            j = j2
+        if j < len(text) and text[j] == "G":
+            j += 1
+            if args:
+                if base.name in {"DeserializeFunctionResponse", "FunctionDescription"}:
+                    return args[-1], j
+                return TypeExpr(name=base.name, args=args, namespace=base.namespace), j
+        return base, j
+
+    def parse_list(self, text: str, i: int, *, stop: str = "tFZ") -> tuple[list[TypeExpr] | None, int]:
+        first, j = self.parse_type(text, i)
+        if first is None:
+            return None, i
+        types = self._flatten(first)
+        if j < len(text) and text[j] == "_":
+            j += 1
+            while j < len(text) and text[j] not in stop:
+                t, j2 = self.parse_type(text, j)
+                if t is None:
+                    break
+                types.extend(self._flatten(t))
+                j = j2
+        return types, j
+
+    def parse_function_signature(self, text: str) -> tuple[TypeExpr, list[TypeExpr] | None]:
+        types, j = self.parse_list(text, 0)
+        result = TypeExpr(name="Unknown")
+        params: list[TypeExpr] | None = None
+        if types and len(types) >= 3:
+            result = types[2]
+            if j < len(text) and text[j] == "t":
+                j += 1
+            rest, _j = self.parse_list(text, j)
+            params = rest
+        elif types:
+            params = types
+        return result, params
 
     def parse_type_list(self, text: str) -> list[TypeExpr] | None:
         if not text:
             return []
-        i = 0
-        first, i = self.parse_type(text, i)
-        if first is None:
+        types, j = self.parse_list(text, 0, stop="")
+        if types is None:
             return None
-        types = [first]
-        if i < len(text) and text[i] == "_":
-            i += 1
-            while i < len(text):
-                t, i = self.parse_type(text, i)
-                if t is None:
-                    return None
-                types.extend(self._flatten(t))
-            return types if i == len(text) else None
-        types = self._flatten(first)
-        return types if i == len(text) else None
+        return types if j == len(text) else None
 
     @staticmethod
     def _flatten(t: TypeExpr) -> list[TypeExpr]:
@@ -572,26 +641,6 @@ def _result_name(result_blob: str, words: WordTable) -> TypeExpr:
     return TypeExpr(name=chunk or "Unknown")
 
 
-_FALLBACK_BY_LABEL = {
-    "scheduleDate": "int",
-    "scheduleRepeatPeriod": "int",
-    "sendAs": "InputPeer",
-    "effect": "long",
-    "allowPaidStars": "long",
-    "randomId": "long",
-    "offset": "int",
-    "limit": "int",
-    "hash": "long",
-    "topMsgId": "int",
-    "msgId": "int",
-    "queryId": "long",
-    "minId": "int",
-    "maxId": "int",
-    "addOffset": "int",
-    "maxId": "int",
-}
-
-
 def zip_params(labels: list[str], types: list[TypeExpr] | None) -> list[Parameter]:
     types = types or []
     n = max(len(labels), len(types))
@@ -605,8 +654,6 @@ def zip_params(labels: list[str], types: list[TypeExpr] | None) -> list[Paramete
         if name == "flags" and typ.name in {"int", "Int32"}:
             typ = TypeExpr(name="#", is_nat=True)
             optional = False
-        elif name and typ.name.startswith("subst_") and name in _FALLBACK_BY_LABEL:
-            typ = TypeExpr(name=_FALLBACK_BY_LABEL[name], args=typ.args)
         out.append(Parameter(name=name, type=_mark_optional(typ, optional)))
     return out
 
@@ -664,17 +711,29 @@ def parse_signature(head: str, type_blob: str, *, namespace: str = "", method: s
         if parsed is None:
             return None
     name, labels, truncated = parsed
-    result_blob, params_blob = split_result_and_params(type_blob)
     words.add_ident("FunctionDescription")
-    absorb_idents(result_blob, words)
+    words.add_ident("Buffer")
+    words.add_ident("DeserializeFunctionResponse")
+    absorb_idents(type_blob, words)
     tparser = TypeParser(words)
-    types = tparser.parse_type_list(params_blob)
-    result = _result_name(result_blob, words)
-    notes = []
-    if types is None:
-        notes.append("param_types_unparsed")
-        types = []
-    elif labels and types and len(types) != len(labels):
+    result, types = tparser.parse_function_signature(MARKER + type_blob)
+    notes: list[str] = []
+    if types is None or result.name in {
+        "",
+        "Unknown",
+        "DeserializeFunctionResponse",
+        "FunctionDescription",
+        "Buffer",
+    }:
+        result_blob, params_blob = split_result_and_params(type_blob)
+        if types is None:
+            types = tparser.parse_type_list(params_blob)
+        if result.name in {"", "Unknown", "DeserializeFunctionResponse", "FunctionDescription", "Buffer"}:
+            result = _result_name(result_blob, words)
+        if types is None:
+            notes.append("param_types_unparsed")
+            types = []
+    if labels and types and len(types) != len(labels):
         notes.append(f"arity {len(labels)} labels vs {len(types)} types")
     params = zip_params(labels, types)
     return ParsedSig(
@@ -709,14 +768,39 @@ def iter_raw_signatures(data: bytes) -> list[tuple[str, str]]:
     return out
 
 
+def _looks_like_rpc_name(name: str) -> bool:
+    if "." not in name:
+        return False
+    _ns, short = name.split(".", 1)
+    if short.lower() in {
+        "mov",
+        "mp4",
+        "m4v",
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "wav",
+        "mp3",
+        "pdf",
+        "zip",
+        "ipa",
+        "txt",
+    }:
+        return False
+    return any("A" <= ch <= "Z" for ch in short[1:]) or len(short) >= 8
+
+
 def extract_method_cstrings(data: bytes) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
-    for match in METHOD_STRING.finditer(data.decode("latin-1", "ignore")):
-        name = match.group()
-        if name not in seen:
-            seen.add(name)
-            names.append(name)
+    blob = b"\x00" + data + b"\x00"
+    for match in _CSTRING_METHOD.finditer(blob):
+        name = match.group(1).decode("ascii")
+        if name in seen or not _looks_like_rpc_name(name):
+            continue
+        seen.add(name)
+        names.append(name)
     return names
 
 
@@ -787,14 +871,8 @@ def attach_binary_methods(data: bytes) -> list[dict]:
         exact = [n for n in by_short.get(frag, []) if n in unused]
         cands = exact or _fragment_candidates(frag, by_short, unused=unused)
         if not cands:
-            frag = name_fragment(head)
-            hint = _nearby_namespace(slots, i)
-            parsed = parse_signature(head, tail, namespace=hint or "", method=frag)
-            synth = None
-            if hint and frag and _looks_like_method(frag):
-                synth = f"{hint}.{frag}"
-                unused.discard(synth)
-            slots[i] = (synth, parsed)
+            parsed = parse_signature(head, tail, namespace="", method=frag)
+            slots[i] = (None, parsed)
             continue
         if len(cands) > 1:
             hint = _nearby_namespace(slots, i)

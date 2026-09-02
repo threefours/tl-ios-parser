@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .catalog import build_method_index, build_type_index, load_ida_methods
-from .from_ipa import extract_from_binary, extract_from_path
+from .diff_layer import diff_paths, format_diff, has_changes
+from .from_ipa import extract_from_binary, extract_from_path, format_layer_report
 from .models import Combinator, Schema
 from .parser import load_layer_schema, schema_dir
 
@@ -153,6 +155,30 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).resolve().parent / "out" / "ipa_layer.json",
     )
 
+    differ = sub.add_parser(
+        "diff",
+        help="Show readable API differences between two layer JSON dumps (or two IPAs)",
+    )
+    differ.add_argument("old", type=Path, help="Older ipa_layer.json or .ipa / Payload / binary")
+    differ.add_argument("new", type=Path, help="Newer ipa_layer.json or .ipa / Payload / binary")
+    differ.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write machine-readable JSON diff to this path",
+    )
+    differ.add_argument(
+        "--brief",
+        action="store_true",
+        help="Print only the summary counts",
+    )
+    differ.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_stdout",
+        help="Print JSON diff instead of text",
+    )
+
     args = parser.parse_args(argv)
 
     if args.cmd in {"stats", "lookup", "dump", "extract", "index"}:
@@ -228,12 +254,32 @@ def main(argv: list[str] | None = None) -> int:
         info = extract_from_path(src)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"source: {info['source']}")
-        print(f"binary: {info['binary']}")
-        print(f"layer:  {info['layer']} (offset {info['layer_offset']}, paired={info['layer_paired_thunks']})")
-        print(f"methods: {info['methods_in_ipa_count']} ({info.get('methods_with_signature', 0)} from Swift signatures, {info['methods_with_params']} with arguments)")
+        report = format_layer_report(info)
+        text_path = args.output.with_suffix(".txt")
+        text_path.write_text(report, encoding="utf-8")
+        print(report, end="")
         print(f"wrote {args.output}")
+        print(f"wrote {text_path}")
         return 0
+
+    if args.cmd == "diff":
+        try:
+            diff = diff_paths(args.old, args.new)
+        except FileNotFoundError as exc:
+            print(f"not found: {exc}", file=sys.stderr)
+            return 2
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(diff, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            print(f"wrote {args.output}")
+        if args.json_stdout:
+            print(json.dumps(diff, indent=2, ensure_ascii=False))
+        else:
+            print(format_diff(diff, brief=args.brief), end="")
+        return 1 if has_changes(diff) else 0
 
     return 1
 
