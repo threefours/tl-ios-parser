@@ -1,4 +1,5 @@
 from .diff_layer import diff_dumps, diff_paths, format_diff, has_changes
+from .from_app import extract_from_app
 from .from_ipa import extract_from_path
 from .parser import (
     TLParseError,
@@ -20,6 +21,7 @@ __all__ = [
     "diff_paths",
     "format_diff",
     "has_changes",
+    "extract_from_app",
     "extract_from_path",
     "load_layer_schema",
     "merge_schemas",
