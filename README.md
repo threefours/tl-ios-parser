@@ -72,6 +72,63 @@ Optional fields from `T?` become `optional: true`. Flag **bit numbers** (`flags.
 
 If a Swift type substitution cannot be resolved from this mangled string, the type is left as `subst_N`. Argument types are never guessed from parameter names.
 
+## Extract from a macOS Telegram.app
+
+The macOS client (Telegram-Swift, `ru.keepcoder.Telegram`) is a single
+**universal (FAT)** Mach-O at `Telegram.app/Contents/MacOS/Telegram` — there is
+no separate `TelegramCoreFramework`. The layer thunk and Swift metadata are read
+from the **arm64** slice.
+
+```text
+python -m tl_layer from-app
+python -m tl_layer from-app path\to\Telegram.app
+python -m tl_layer from-app path\to\Telegram.app\Contents\MacOS\Telegram
+python -m tl_layer from-app Telegram.app -o tl_layer\out\app_layer.json
+```
+
+With no path, the command uses the first `*.app` next to the repo.
+
+What it reads in the Mach-O:
+
+1. **Layer number** — same ARM64 `MOV W0, #n; RET` thunk as the IPA path.
+2. **Method signatures** — the ~850 Swift `FunctionDescription` fragments
+   (method name, argument labels, argument types, result type).
+3. **Namespaces** — the macOS binary has **no** clean `namespace.method` strings,
+   no Swift symbols, and no per-method namespace pointers. The methods are
+   contiguously grouped by namespace in the binary, and each fragment's word
+   compression is relative to its `TelegramApi.Api.functions.<namespace>`
+   context, so the namespace is needed to demangle the labels. It is taken from
+   the checked-in `schema/api.tl` used **only** as a `method name → namespace`
+   oracle (anchoring the binary's contiguous runs). **Types and argument names
+   still come from the binary** — `api.tl` never supplies a type.
+4. **macOS-only namespaces** — namespaces missing from the `api.tl` snapshot
+   (e.g. `feed` / `wallet` / `toncenter`) are labelled **from the binary alone**:
+   the Swift reflection (`__swift5_types`) lists every namespace and its types,
+   and a method cluster is attributed to the namespace whose own types its
+   signatures return/accept (`feed` methods return `feed.FeedMessages`,
+   `feed.ForYouFeed`, …). Those methods carry `namespace_source: "reflection"`.
+
+### Output
+
+Default file: `tl_layer/out/app_layer.json` (plus a readable `app_layer.txt`).
+
+Same per-method shape as `from-ipa`, with `source: "app"`. Extra flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `namespace_source: "reflection"` | the namespace was recovered from the binary's Swift reflection (a macOS-only namespace such as `feed` / `wallet` / `toncenter`), not from `api.tl` |
+| `name_uncertain` | the method name is the raw binary fragment; it matched no `api.tl` name in its namespace (a macOS-only / newly-added method, or a fragment the demangler truncated) |
+| `namespace_unresolved` | the namespace could not be established at all (a boundary fragment, or a cluster whose types were not conclusive); the signature is still binary-derived |
+
+The header of `app_layer.txt` reports totals: methods, with-signature,
+with-arguments, without-namespace, namespace-from-reflection (and which), and
+name-uncertain. `[?]` groups the still-unresolved methods.
+
+Example — comparing two macOS builds shows the `feed` namespace is new in
+`13.0 (283323)`, layer 232: it is absent from `namespaces_in_binary` in the
+older `283309` (layer 230), which carries only `toncenter` / `wallet` as
+reflection-only namespaces.
+
 ## Diff two layers
 
 Pass two `ipa_layer.json` dumps, or two IPAs / `Payload` trees / binaries:
@@ -104,6 +161,7 @@ python -m tl_layer index
 ```text
 tl_layer/
   from_ipa.py         IPA unpack, layer thunk, Core framework
+  from_app.py         macOS .app (FAT arm64), reflection namespaces, api.tl oracle
   swift_mangling.py   FunctionDescription demangle (labels + types)
   diff_layer.py       Readable diff of two layer dumps
   parser.py           TL language parser (optional schema commands)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .catalog import build_method_index, build_type_index, load_ida_methods
 from .diff_layer import diff_paths, format_diff, has_changes
+from .from_app import extract_from_app, format_app_report
 from .from_ipa import extract_from_binary, extract_from_path, format_layer_report
 from .models import Combinator, Schema
 from .parser import load_layer_schema, schema_dir
@@ -155,6 +156,24 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).resolve().parent / "out" / "ipa_layer.json",
     )
 
+    fromapp = sub.add_parser(
+        "from-app",
+        help="Read layer and methods/args from a macOS Telegram.app (arm64 slice)",
+    )
+    fromapp.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        help="Path to Telegram.app, its Contents/MacOS binary, or a Mach-O "
+        "(default: Telegram.app next to the repo)",
+    )
+    fromapp.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path(__file__).resolve().parent / "out" / "app_layer.json",
+    )
+
     differ = sub.add_parser(
         "diff",
         help="Show readable API differences between two layer JSON dumps (or two IPAs)",
@@ -255,6 +274,23 @@ def main(argv: list[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         report = format_layer_report(info)
+        text_path = args.output.with_suffix(".txt")
+        text_path.write_text(report, encoding="utf-8")
+        print(report, end="")
+        print(f"wrote {args.output}")
+        print(f"wrote {text_path}")
+        return 0
+
+    if args.cmd == "from-app":
+        src = args.path
+        if src is None:
+            repo = Path(__file__).resolve().parents[1]
+            apps = sorted(repo.glob("*.app")) or sorted(repo.glob("**/*.app"))
+            src = apps[0] if apps else repo / "Telegram.app"
+        info = extract_from_app(src)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        report = format_app_report(info)
         text_path = args.output.with_suffix(".txt")
         text_path.write_text(report, encoding="utf-8")
         print(report, end="")
